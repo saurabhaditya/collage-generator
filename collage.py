@@ -214,10 +214,47 @@ def discover_children(baby_dir: str, children_dir: str,
 # ---------------------------------------------------------------------------
 
 def select_best_photos(child_photos: list, max_photos: int = 5) -> list:
+    """Select the best photos, preferring ones with detected faces."""
     if len(child_photos) <= max_photos:
         return child_photos
-    step = len(child_photos) / max_photos
-    return [child_photos[int(i * step)] for i in range(max_photos)]
+
+    import cv2
+    from face_utils import pil_to_cv, detect_face
+
+    # Score each photo: has face = 1, no face = 0
+    scored = []
+    for cp in child_photos:
+        try:
+            img = Image.open(cp)
+            img = ImageOps.exif_transpose(img)
+            if img.mode in ('RGBA', 'P'):
+                img = img.convert('RGB')
+            img.thumbnail((400, 400), Image.LANCZOS)
+            cv_img = pil_to_cv(img)
+            face = detect_face(cv_img)
+            scored.append((cp, 1 if face else 0))
+        except Exception:
+            scored.append((cp, 0))
+
+    # Separate photos with and without faces
+    with_faces = [cp for cp, s in scored if s == 1]
+    without_faces = [cp for cp, s in scored if s == 0]
+
+    # Only use face photos; fall back to non-face only if needed
+    if len(with_faces) >= max_photos:
+        step = len(with_faces) / max_photos
+        return [with_faces[int(i * step)] for i in range(max_photos)]
+    elif with_faces:
+        # Use all face photos + fill remainder from non-face if needed
+        result = with_faces[:]
+        remaining = max_photos - len(result)
+        if remaining > 0 and without_faces:
+            result += without_faces[:remaining]
+        return result[:max_photos]
+    else:
+        # No faces detected at all — use evenly spaced
+        step = len(child_photos) / max_photos
+        return [child_photos[int(i * step)] for i in range(max_photos)]
 
 
 def build_photo_grid(child_data: list, name: str) -> str:
@@ -256,10 +293,11 @@ def build_photo_grid(child_data: list, name: str) -> str:
 def generate_html(name: str, baby_photo: str | None, child_photos: list,
                   dedication: str) -> str:
     first_name = name.split()[0]
+    full_name = name
 
     # Baby photo section
     baby_section = ""
-    if baby_photo:
+    if baby_photo and dedication:
         baby_b64 = image_to_base64_simple(baby_photo, max_size=900)
         baby_section = f'''
         <div class="top-section">
@@ -274,6 +312,19 @@ def generate_html(name: str, baby_photo: str | None, child_photos: list,
             <div class="dedication-container">
                 <div class="label">Dedication</div>
                 <div class="text">{dedication}</div>
+            </div>
+        </div>'''
+    elif baby_photo:
+        baby_b64 = image_to_base64_simple(baby_photo, max_size=900)
+        baby_section = f'''
+        <div class="top-section" style="height: 2.2in; justify-content: center;">
+            <div class="baby-photo-container" style="margin-left: 0;">
+                <div>
+                    <div class="baby-photo-frame">
+                        <img src="{baby_b64}" alt="{name} as a baby">
+                    </div>
+                    <div class="baby-label">Baby {first_name}</div>
+                </div>
             </div>
         </div>'''
     elif dedication:
@@ -338,8 +389,9 @@ def generate_html(name: str, baby_photo: str | None, child_photos: list,
         text-align: center; margin-bottom: 0.15in; flex-shrink: 0;
     }}
     .header h1 {{
-        font-size: 30pt; font-weight: 700; color: #4a3a10;
-        letter-spacing: 4px; text-transform: uppercase;
+        font-size: {min(30, max(18, 300 // max(len(full_name), 1)))}pt;
+        font-weight: 700; color: #4a3a10;
+        letter-spacing: 3px; text-transform: uppercase;
         font-family: 'Georgia', serif; line-height: 1.1;
     }}
     .header .ornament {{
@@ -431,7 +483,7 @@ def generate_html(name: str, baby_photo: str | None, child_photos: list,
 <div class="page">
     <div class="header">
         <div class="ornament">&bull; &bull; &bull;</div>
-        <h1>{first_name}</h1>
+        <h1>{full_name}</h1>
         <div class="ornament">&bull; &bull; &bull;</div>
     </div>
     <div class="content" style="flex:1; display:flex; flex-direction:column; z-index:1; min-height:0;">
