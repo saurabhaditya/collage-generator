@@ -33,6 +33,7 @@ Usage:
 import argparse
 import base64
 import io
+import json
 import os
 import re
 import subprocess
@@ -140,10 +141,34 @@ def find_baby_photo(child_name: str, baby_dir: str) -> str | None:
             best_score = score
             best_match = fpath
 
-    return best_match if best_score > 0.45 else None
+    return best_match if best_score > 0.8 else None
 
 
-def discover_children(baby_dir: str, children_dir: str) -> list[dict]:
+def load_mapping(mapping_path: str, baby_dir: str) -> dict:
+    """Load a name->filename mapping JSON and resolve to full paths."""
+    if not mapping_path or not os.path.exists(mapping_path):
+        return {}
+    with open(mapping_path) as f:
+        raw = json.load(f)
+    resolved = {}
+    for name, files in raw.items():
+        if isinstance(files, str):
+            files = [files]
+        # Try each file until we find one that exists
+        for fname in files:
+            fpath = os.path.join(baby_dir, fname)
+            if os.path.exists(fpath):
+                resolved[name.lower()] = fpath
+                break
+    return resolved
+
+
+def discover_children(baby_dir: str, children_dir: str,
+                      mapping: dict = None) -> list[dict]:
+    """mapping: dict of lowercase_name -> baby_photo_path from scrape."""
+    if mapping is None:
+        mapping = {}
+
     children = []
     for entry in sorted(os.listdir(children_dir)):
         child_path = os.path.join(children_dir, entry)
@@ -168,7 +193,10 @@ def discover_children(baby_dir: str, children_dir: str) -> list[dict]:
                 with open(fp) as tf:
                     dedication = tf.read().strip()
 
-        baby_photo = find_baby_photo(entry, baby_dir)
+        # Try mapping first (from scraped album), then filename matching
+        baby_photo = mapping.get(entry.lower())
+        if not baby_photo:
+            baby_photo = find_baby_photo(entry, baby_dir)
 
         children.append({
             "name": entry,
@@ -547,10 +575,14 @@ def generate_single(name: str, baby_photo: str | None, child_photos_dir: str,
 
 def generate_all(baby_dir: str, children_dir: str, output_dir: str,
                  only: str | None = None, html_only: bool = False,
-                 yearbook: str | None = None):
+                 yearbook: str | None = None, mapping_path: str | None = None):
     os.makedirs(output_dir, exist_ok=True)
 
-    children = discover_children(baby_dir, children_dir)
+    mapping = load_mapping(mapping_path, baby_dir) if mapping_path else {}
+    if mapping:
+        print(f"Loaded {len(mapping)} baby photo mappings from {mapping_path}")
+
+    children = discover_children(baby_dir, children_dir, mapping=mapping)
     print(f"Discovered {len(children)} children\n")
 
     if only:
@@ -641,6 +673,7 @@ def main():
     parser.add_argument('--output-dir', help='Output directory')
     parser.add_argument('--only', help='Generate only for this child')
 
+    parser.add_argument('--mapping', help='Baby name→filename JSON mapping (from scrape_album.py)')
     parser.add_argument('--merge', action='store_true', help='Merge existing PDFs into yearbook')
     parser.add_argument('--yearbook', default='yearbook.pdf', help='Yearbook output filename')
     parser.add_argument('--html-only', action='store_true', help='Output HTML only')
@@ -656,7 +689,7 @@ def main():
             parser.error("--auto requires --baby-dir, --children-dir, --output-dir")
         generate_all(args.baby_dir, args.children_dir, args.output_dir,
                      only=args.only, html_only=args.html_only,
-                     yearbook=args.yearbook)
+                     yearbook=args.yearbook, mapping_path=args.mapping)
     elif args.name and args.child_photos and args.output:
         generate_single(args.name, args.baby_photo, args.child_photos,
                         args.dedication or "", args.output, args.html_only)
