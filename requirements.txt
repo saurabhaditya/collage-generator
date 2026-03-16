@@ -1,3 +1,4 @@
 Pillow>=9.0
+pillow-heif>=0.10.0
 opencv-python-headless>=4.5
 PyPDF2>=3.0

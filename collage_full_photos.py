@@ -1,33 +1,27 @@
 #!/usr/bin/env python3
 """
-Child Dedication Collage & Yearbook Generator
+Child Dedication Collage & Yearbook Generator (Full Photos - No Crop)
 
-Generates dedication collage pages as PDFs, with face-aware cropping
-and auto-rotation. Can merge all pages into a single yearbook PDF.
+Same as collage.py but images are shown in full without any cropping.
+Uses object-fit:contain with a subtle background so every photo is
+displayed completely — no information loss. Images are only EXIF-rotated.
 
 Usage:
     # Generate for all children
-    python3 collage.py --auto \
+    python3 collage_full_photos.py --auto \
         --baby-dir "./Baby Photos" \
         --children-dir "./Individual Photos" \
         --output-dir ./output
 
     # Generate for one child only
-    python3 collage.py --auto \
+    python3 collage_full_photos.py --auto \
         --baby-dir "./Baby Photos" \
         --children-dir "./Individual Photos" \
         --output-dir ./output \
         --only "Savit Baranwal"
 
-    # Single child (manual mode)
-    python3 collage.py --name "Savit Baranwal" \
-        --baby-photo baby.jpg \
-        --child-photos ./photos/ \
-        --dedication "Text here" \
-        --output savit.pdf
-
     # Merge existing PDFs into yearbook
-    python3 collage.py --merge --output-dir ./output --yearbook yearbook.pdf
+    python3 collage_full_photos.py --merge --output-dir ./output --yearbook yearbook.pdf
 """
 
 import argparse
@@ -50,7 +44,6 @@ try:
     register_heif_opener()
 except ImportError:
     pass
-from face_utils import process_photo
 
 IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.heic', '.heif'}
 
@@ -59,50 +52,22 @@ IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.heic', '.heif'
 # Image utilities
 # ---------------------------------------------------------------------------
 
-def image_to_base64_with_face(image_path: str, max_size: int = 1200,
-                              target_cell_ratio: float = None) -> tuple[str, str]:
+def image_to_base64(image_path: str, max_size: int = 1200) -> str:
     """
-    Process image with face detection, return (base64_data_uri, css_object_position).
-    target_cell_ratio: width/height of the grid cell this photo will occupy.
+    Load image, apply EXIF transpose, resize, and base64-encode.
+    Returns data_uri string.
     """
-    img, (x_pct, y_pct), angle = process_photo(image_path, max_size=max_size,
-                                                 target_cell_ratio=target_cell_ratio)
+    img = Image.open(image_path)
+    img = ImageOps.exif_transpose(img)
+    img.thumbnail((max_size, max_size), Image.LANCZOS)
+    if img.mode in ('RGBA', 'P'):
+        img = img.convert('RGB')
 
     buffer = io.BytesIO()
     img.save(buffer, format='JPEG', quality=88)
     b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
 
-    data_uri = f"data:image/jpeg;base64,{b64}"
-    obj_pos = f"{x_pct}% {y_pct}%"
-
-    if abs(angle) >= 1.5:
-        print(f"    Rotated {os.path.basename(image_path)} by {angle:.1f}°")
-
-    return data_uri, obj_pos
-
-
-def image_to_base64_simple(image_path: str, max_size: int = 1200,
-                           target_cell_ratio: float = None) -> tuple[str, str]:
-    """
-    Base64 encode with optional face-aware cropping for baby photos.
-    Returns (data_uri, css_object_position).
-    """
-    if target_cell_ratio is not None:
-        # Use face-aware processing for baby photos too
-        img, (x_pct, y_pct), _ = process_photo(image_path, max_size=max_size,
-                                                 target_cell_ratio=target_cell_ratio)
-    else:
-        img = Image.open(image_path)
-        img = ImageOps.exif_transpose(img)
-        img.thumbnail((max_size, max_size), Image.LANCZOS)
-        if img.mode in ('RGBA', 'P'):
-            img = img.convert('RGB')
-        x_pct, y_pct = 50, 30
-
-    buffer = io.BytesIO()
-    img.save(buffer, format='JPEG', quality=88)
-    b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
-    return f"data:image/jpeg;base64,{b64}", f"{x_pct}% {y_pct}%"
+    return f"data:image/jpeg;base64,{b64}"
 
 
 def is_image(path: str) -> bool:
@@ -164,7 +129,6 @@ def find_baby_photo(child_name: str, baby_dir: str) -> str | None:
 
 
 def load_mapping(mapping_path: str, baby_dir: str) -> dict:
-    """Load a name->filename mapping JSON and resolve to full paths."""
     if not mapping_path or not os.path.exists(mapping_path):
         return {}
     with open(mapping_path) as f:
@@ -173,7 +137,6 @@ def load_mapping(mapping_path: str, baby_dir: str) -> dict:
     for name, files in raw.items():
         if isinstance(files, str):
             files = [files]
-        # Try each file until we find one that exists
         for fname in files:
             fpath = os.path.join(baby_dir, fname)
             if os.path.exists(fpath):
@@ -184,7 +147,6 @@ def load_mapping(mapping_path: str, baby_dir: str) -> dict:
 
 def discover_children(baby_dir: str, children_dir: str,
                       mapping: dict = None) -> list[dict]:
-    """mapping: dict of lowercase_name -> baby_photo_path from scrape."""
     if mapping is None:
         mapping = {}
 
@@ -212,7 +174,6 @@ def discover_children(baby_dir: str, children_dir: str,
                 with open(fp) as tf:
                     dedication = tf.read().strip()
 
-        # Try mapping first (from scraped album), then filename matching
         baby_photo = mapping.get(entry.lower())
         if not baby_photo:
             baby_photo = find_baby_photo(entry, baby_dir)
@@ -229,92 +190,26 @@ def discover_children(baby_dir: str, children_dir: str,
 
 
 # ---------------------------------------------------------------------------
-# HTML collage generation
+# HTML collage generation (full photos, no crop)
 # ---------------------------------------------------------------------------
 
 def select_best_photos(child_photos: list, max_photos: int = 5) -> list:
-    """Select the best photos, preferring ones with large, reliably detected faces."""
+    """Select photos by evenly spacing through the list."""
     if len(child_photos) <= max_photos:
         return child_photos
-
-    from face_utils import pil_to_cv, detect_face
-
-    # Score each photo by face size relative to image (0.0 = no face, higher = larger face)
-    scored = []
-    for cp in child_photos:
-        try:
-            img = Image.open(cp)
-            img = ImageOps.exif_transpose(img)
-            if img.mode in ('RGBA', 'P'):
-                img = img.convert('RGB')
-            img.thumbnail((400, 400), Image.LANCZOS)
-            cv_img = pil_to_cv(img)
-            face = detect_face(cv_img)
-            if face:
-                face_pct = face[2] / img.size[0]  # face width as fraction of image
-                # Treat tiny detections as unreliable (likely false positives)
-                if face_pct < 0.08:
-                    scored.append((cp, 0.0))
-                else:
-                    scored.append((cp, face_pct))
-            else:
-                scored.append((cp, 0.0))
-        except Exception:
-            scored.append((cp, 0.0))
-
-    # Separate into tiers: good faces (>12% of width), small faces, no faces
-    good_faces = [(cp, s) for cp, s in scored if s > 0.12]
-    small_faces = [(cp, s) for cp, s in scored if 0 < s <= 0.12]
-    no_faces = [(cp, s) for cp, s in scored if s == 0.0]
-
-    if len(good_faces) >= max_photos:
-        # Pick the photos with the largest/most reliable face detections
-        good_faces.sort(key=lambda x: x[1], reverse=True)
-        return [good_faces[i][0] for i in range(max_photos)]
-    else:
-        # Use all good faces (sorted by score), then fill with small faces, then no faces
-        good_faces.sort(key=lambda x: x[1], reverse=True)
-        result = [cp for cp, s in good_faces]
-        remaining = max_photos - len(result)
-        if remaining > 0 and small_faces:
-            small_faces.sort(key=lambda x: x[1], reverse=True)
-            result += [cp for cp, s in small_faces[:remaining]]
-            remaining = max_photos - len(result)
-        if remaining > 0 and no_faces:
-            result += [cp for cp, s in no_faces[:remaining]]
-        return result[:max_photos]
+    n = len(child_photos)
+    indices = [int(i * (n - 1) / (max_photos - 1)) for i in range(max_photos)]
+    return [child_photos[i] for i in indices]
 
 
-def build_photo_grid(child_data: list, name: str) -> str:
-    num = len(child_data)
+def build_photo_items(photo_uris: list, name: str) -> str:
+    """Build HTML for photos using flexbox layout with object-fit:contain."""
     items = ""
-
-    def item(cd, col_start, col_end, row):
-        obj_pos = cd.get('obj_pos', '50% 20%')
-        return f'''
-            <div class="grid-item" style="grid-column: {col_start} / {col_end}; grid-row: {row};">
-                <img src="{cd['b64']}" alt="{name}" style="object-position: {obj_pos};">
-            </div>'''
-
-    if num >= 5:
-        for i in range(3):
-            items += item(child_data[i], i*2+1, i*2+3, 1)
-        items += item(child_data[3], 1, 4, 2)
-        items += item(child_data[4], 4, 7, 2)
-    elif num == 4:
-        for i in range(4):
-            col = (i % 2) * 3 + 1
-            row = i // 2 + 1
-            items += item(child_data[i], col, col+3, row)
-    elif num == 3:
-        for i in range(3):
-            items += item(child_data[i], i*2+1, i*2+3, 1)
-    elif num == 2:
-        for i in range(2):
-            items += item(child_data[i], i*3+1, i*3+4, 1)
-    elif num == 1:
-        items += item(child_data[0], 2, 6, 1)
-
+    for uri in photo_uris:
+        items += f'''
+                <div class="photo-cell">
+                    <img src="{uri}" alt="{name}">
+                </div>'''
     return items
 
 
@@ -324,18 +219,15 @@ def generate_html(name: str, baby_photo: str | None, child_photos: list,
     full_name = name
 
     # Baby photo section
-    # Baby photo frame: 1.8in x 2.2in => ratio 0.818 (portrait)
-    BABY_RATIO = 1.8 / 2.2
     baby_section = ""
     if baby_photo and dedication:
-        baby_b64, baby_obj_pos = image_to_base64_simple(baby_photo, max_size=900,
-                                                         target_cell_ratio=BABY_RATIO)
+        baby_b64 = image_to_base64(baby_photo, max_size=900)
         baby_section = f'''
         <div class="top-section">
             <div class="baby-photo-container">
                 <div>
                     <div class="baby-photo-frame">
-                        <img src="{baby_b64}" alt="{name} as a baby" style="object-position: {baby_obj_pos};">
+                        <img src="{baby_b64}" alt="{name} as a baby">
                     </div>
                     <div class="baby-label">Baby {first_name}</div>
                 </div>
@@ -346,14 +238,13 @@ def generate_html(name: str, baby_photo: str | None, child_photos: list,
             </div>
         </div>'''
     elif baby_photo:
-        baby_b64, baby_obj_pos = image_to_base64_simple(baby_photo, max_size=900,
-                                                         target_cell_ratio=BABY_RATIO)
+        baby_b64 = image_to_base64(baby_photo, max_size=900)
         baby_section = f'''
         <div class="top-section" style="height: 2.2in; justify-content: center;">
             <div class="baby-photo-container" style="margin-left: 0;">
                 <div>
                     <div class="baby-photo-frame">
-                        <img src="{baby_b64}" alt="{name} as a baby" style="object-position: {baby_obj_pos};">
+                        <img src="{baby_b64}" alt="{name} as a baby">
                     </div>
                     <div class="baby-label">Baby {first_name}</div>
                 </div>
@@ -366,66 +257,62 @@ def generate_html(name: str, baby_photo: str | None, child_photos: list,
             <div class="text">{dedication}</div>
         </div>'''
 
-    # Process child photos with face detection
+    # Process child photos
     photos = select_best_photos(child_photos, max_photos=5)
 
-    # Grid cell aspect ratios (width/height) for each position.
-    # Page: 8.5x11in, padding 0.45in top/bottom + 0.55in left/right
-    # Usable width: ~7.4in, grid height: ~6.5in
-    # Row 1 (1.2fr): 3 cells spanning 2 cols each — portrait-ish
-    # Row 2 (1.0fr): 2 cells spanning 3 cols each — landscape-ish
-    _grid_w = 7.4
-    _gap = 0.1
-    _grid_h = 6.5
-    _row1_h = _grid_h * (1.2 / 2.2) - _gap / 2
-    _row2_h = _grid_h * (1.0 / 2.2) - _gap / 2
-    _row1_cell_w = (_grid_w - 2 * _gap) / 3
-    _row2_cell_w = (_grid_w - 1 * _gap) / 2
-    ROW1_RATIO = _row1_cell_w / _row1_h   # ~0.70
-    ROW2_RATIO = _row2_cell_w / _row2_h   # ~1.24
+    photo_uris = []
+    for cp in photos:
+        uri = image_to_base64(cp, max_size=1200)
+        photo_uris.append(uri)
 
-    # After reordering [4,0,2,3,1], grid positions are:
-    # pos 0,1,2 -> row 1 (portrait), pos 3,4 -> row 2 (landscape)
-    # Original photo indices map to these positions:
-    # photo[0] -> reorder pos 1 -> row 1
-    # photo[1] -> reorder pos 4 -> row 2
-    # photo[2] -> reorder pos 2 -> row 1
-    # photo[3] -> reorder pos 3 -> row 2
-    # photo[4] -> reorder pos 0 -> row 1
-    num = len(photos)
+    # Reorder: put last photo first for prominence
+    if len(photo_uris) >= 5:
+        photo_uris = [photo_uris[4], photo_uris[0], photo_uris[2],
+                       photo_uris[3], photo_uris[1]]
+
+    num = len(photo_uris)
+    photo_items = build_photo_items(photo_uris, name)
+
+    # Layout strategy: use flexbox rows that let images show fully.
+    # Row 1: top row photos, Row 2: bottom row photos.
+    # Each photo uses object-fit:contain so nothing is cropped.
+    # The cell background matches the page to avoid ugly bars.
+
     if num >= 5:
-        # Map original photo index to target cell ratio
-        photo_cell_ratios = {
-            0: ROW1_RATIO,  # goes to grid pos 1 (row 1)
-            1: ROW2_RATIO,  # goes to grid pos 4 (row 2)
-            2: ROW1_RATIO,  # goes to grid pos 2 (row 1)
-            3: ROW2_RATIO,  # goes to grid pos 3 (row 2)
-            4: ROW1_RATIO,  # goes to grid pos 0 (row 1)
-        }
+        row1_items = build_photo_items(photo_uris[:3], name)
+        row2_items = build_photo_items(photo_uris[3:], name)
+        photo_html = f'''
+            <div class="photo-row photo-row-3">
+                {row1_items}
+            </div>
+            <div class="photo-row photo-row-2">
+                {row2_items}
+            </div>'''
     elif num == 4:
-        photo_cell_ratios = {i: ROW2_RATIO for i in range(4)}
+        row1_items = build_photo_items(photo_uris[:2], name)
+        row2_items = build_photo_items(photo_uris[2:], name)
+        photo_html = f'''
+            <div class="photo-row photo-row-2">
+                {row1_items}
+            </div>
+            <div class="photo-row photo-row-2">
+                {row2_items}
+            </div>'''
     elif num == 3:
-        photo_cell_ratios = {i: ROW1_RATIO for i in range(3)}
+        photo_html = f'''
+            <div class="photo-row photo-row-3">
+                {photo_items}
+            </div>'''
     elif num == 2:
-        photo_cell_ratios = {i: ROW2_RATIO for i in range(2)}
+        photo_html = f'''
+            <div class="photo-row photo-row-2">
+                {photo_items}
+            </div>'''
     else:
-        photo_cell_ratios = {0: (_grid_w * 4 / 6) / _grid_h}
-
-    child_data = []
-    for i, cp in enumerate(photos):
-        ratio = photo_cell_ratios.get(i)
-        b64, obj_pos = image_to_base64_with_face(cp, max_size=1200,
-                                                  target_cell_ratio=ratio)
-        child_data.append({"b64": b64, "obj_pos": obj_pos})
-
-    # Reorder: put last (most recent) photo first for prominence
-    if len(child_data) >= 5:
-        reordered = [child_data[4], child_data[0], child_data[2],
-                     child_data[3], child_data[1]]
-        child_data = reordered
-
-    photo_items = build_photo_grid(child_data, name)
-    grid_rows = "1.2fr 1fr" if len(child_data) >= 4 else "1fr"
+        photo_html = f'''
+            <div class="photo-row photo-row-1">
+                {photo_items}
+            </div>'''
 
     html = f'''<!DOCTYPE html>
 <html lang="en">
@@ -492,7 +379,8 @@ def generate_html(name: str, baby_photo: str | None, child_photos: list,
     }}
     .baby-photo-frame img {{
         display: block; width: 1.8in; height: 2.2in;
-        border-radius: 5px; object-fit: cover;
+        border-radius: 5px; object-fit: contain;
+        background: #f5eed6;
     }}
     .baby-label {{
         text-align: center; font-size: 7.5pt;
@@ -536,21 +424,34 @@ def generate_html(name: str, baby_photo: str | None, child_photos: list,
         margin-bottom: 0.07in; font-weight: 600;
         text-align: center; flex-shrink: 0;
     }}
-    .photo-grid {{
-        flex: 1; display: grid;
-        grid-template-columns: repeat(6, 1fr);
-        grid-template-rows: {grid_rows};
-        gap: 0.1in; min-height: 0;
+
+    .photo-rows {{
+        flex: 1; display: flex; flex-direction: column;
+        gap: 0.08in; min-height: 0;
     }}
-    .grid-item {{
-        overflow: hidden; border-radius: 6px;
-        border: 2.5px solid #c9a84a; background: white;
-        box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+
+    .photo-row {{
+        flex: 1; display: flex; gap: 0.08in;
+        align-items: center; justify-content: center;
         min-height: 0;
     }}
-    .grid-item img {{
-        width: 100%; height: 100%;
-        object-fit: cover; display: block;
+
+    .photo-cell {{
+        flex: 1; height: 100%;
+        display: flex; align-items: center; justify-content: center;
+        border-radius: 6px;
+        border: 2.5px solid #c9a84a;
+        background: #f5eed6;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+        overflow: hidden;
+        min-height: 0; min-width: 0;
+    }}
+
+    .photo-cell img {{
+        max-width: 100%; max-height: 100%;
+        object-fit: contain;
+        display: block;
+        border-radius: 4px;
     }}
 
     .footer {{
@@ -572,8 +473,8 @@ def generate_html(name: str, baby_photo: str | None, child_photos: list,
         {baby_section}
         <div class="photos-section">
             <div class="section-label">Growing Up</div>
-            <div class="photo-grid">
-                {photo_items}
+            <div class="photo-rows">
+                {photo_html}
             </div>
         </div>
     </div>
@@ -629,7 +530,6 @@ def html_to_pdf(html_content: str, output_path: str) -> bool:
 
 
 def merge_pdfs(pdf_paths: list, output_path: str):
-    """Merge multiple PDFs into one using Python (PyPDF2 or pikepdf or fallback)."""
     try:
         from PyPDF2 import PdfMerger
         merger = PdfMerger()
@@ -652,8 +552,6 @@ def merge_pdfs(pdf_paths: list, output_path: str):
     except ImportError:
         pass
 
-    # Fallback: use macOS built-in python or /usr/bin/python3 with Quartz
-    # Or use ghostscript
     import shutil
     gs = shutil.which("gs")
     if gs:
@@ -662,7 +560,6 @@ def merge_pdfs(pdf_paths: list, output_path: str):
         subprocess.run(cmd, check=True)
         return
 
-    # Last resort: try installing PyPDF2
     print("Installing PyPDF2 for PDF merging...")
     subprocess.run([sys.executable, "-m", "pip", "install", "PyPDF2", "--quiet"],
                    capture_output=True)
@@ -690,7 +587,7 @@ def generate_single(name: str, baby_photo: str | None, child_photos_dir: str,
         print(f"  No photos found in {child_photos_dir}", file=sys.stderr)
         return False
 
-    print(f"  Processing {len(photos)} photos with face detection...")
+    print(f"  Processing {len(photos)} photos (full, no crop)...")
     html = generate_html(name, baby_photo, photos, dedication)
 
     html_out = output.replace('.pdf', '.html')
@@ -764,7 +661,6 @@ def generate_all(baby_dir: str, children_dir: str, output_dir: str,
 
     print(f"\nGenerated: {success}, Skipped: {skipped}, Failed: {failed}")
 
-    # Merge into yearbook if requested
     if yearbook and pdf_paths and not html_only:
         yb_path = yearbook if os.path.isabs(yearbook) else os.path.join(output_dir, yearbook)
         print(f"\nMerging {len(pdf_paths)} pages into yearbook...")
@@ -773,7 +669,6 @@ def generate_all(baby_dir: str, children_dir: str, output_dir: str,
 
 
 def do_merge(output_dir: str, yearbook: str):
-    """Merge all existing collage PDFs in output_dir into a yearbook."""
     pdfs = sorted([
         os.path.join(output_dir, f)
         for f in os.listdir(output_dir)
@@ -791,7 +686,7 @@ def do_merge(output_dir: str, yearbook: str):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Child Dedication Collage & Yearbook Generator',
+        description='Child Dedication Collage & Yearbook Generator (Full Photos - No Crop)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
@@ -807,7 +702,7 @@ def main():
     parser.add_argument('--output-dir', help='Output directory')
     parser.add_argument('--only', help='Generate only for this child')
 
-    parser.add_argument('--mapping', help='Baby name→filename JSON mapping (from scrape_album.py)')
+    parser.add_argument('--mapping', help='Baby name->filename JSON mapping')
     parser.add_argument('--merge', action='store_true', help='Merge existing PDFs into yearbook')
     parser.add_argument('--yearbook', default='yearbook.pdf', help='Yearbook output filename')
     parser.add_argument('--html-only', action='store_true', help='Output HTML only')
